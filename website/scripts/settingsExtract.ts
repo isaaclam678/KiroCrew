@@ -119,6 +119,7 @@ const PANEL_TAB_MAP: Record<string, PanelTarget> = {
 const PRIMITIVE_MAP: Record<string, SettingPrimitiveType> = {
   SettingsToggle: 'toggle',
   SettingsSelect: 'select',
+  SettingsCombobox: 'combobox',
   SettingsInput: 'input',
   SettingsStepper: 'stepper',
   SettingsButtonGroup: 'buttonGroup',

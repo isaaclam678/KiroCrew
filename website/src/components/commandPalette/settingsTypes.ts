@@ -8,7 +8,7 @@
  */
 
 /** Primitive types we recognize. */
-export type SettingPrimitiveType = 'toggle' | 'select' | 'input' | 'stepper' | 'buttonGroup'
+export type SettingPrimitiveType = 'toggle' | 'select' | 'combobox' | 'input' | 'stepper' | 'buttonGroup'
 
 /** A single extracted setting entry. */
 export interface SettingEntry {
