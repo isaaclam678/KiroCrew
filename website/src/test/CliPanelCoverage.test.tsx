@@ -540,7 +540,10 @@ describe('CliPanel theme and font sync', () => {
     document.documentElement.style.setProperty('--bg', '#222233')
     try {
       act(() => { document.documentElement.setAttribute('data-theme', 'legacy-default') })
-      await waitFor(() => expect(term.options.theme?.background).toBe('#222233'))
+      // The repaint runs through a module-level requestAnimationFrame coalesce;
+      // under heavy parallel load jsdom's rAF timer can be starved well past
+      // waitFor's 1s default, so give the poll a generous deadline.
+      await waitFor(() => expect(term.options.theme?.background).toBe('#222233'), { timeout: 4000 })
     } finally {
       document.documentElement.style.removeProperty('--bg')
     }
@@ -556,7 +559,9 @@ describe('CliPanel theme and font sync', () => {
     style.id = 'mc-custom-theme-probe'
     style.textContent = ':root { --accent: #ff8800; }'
     act(() => { document.head.appendChild(style) })
-    await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'))
+    // Same rAF-coalesced repaint path as above; poll on a generous deadline so a
+    // load-starved animation frame can't trip the 1s waitFor default.
+    await waitFor(() => expect(term.options.theme?.cursor).toBe('#ff8800'), { timeout: 4000 })
   })
 
   it('still repaints after a frame handle whose callback never fires', async () => {
