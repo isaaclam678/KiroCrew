@@ -42,6 +42,7 @@ import { LINUX_CAPTION_CONTROLS_WIDTH, TRAFFIC_LIGHT_INSET_PX, WIN_CAPTION_OVERL
 import { isEmbeddedPane } from '../lib/embedded'
 import { isElectron, isLinuxFramelessElectron, isWinElectron } from '../lib/electron'
 import type { DragGap } from '../lib/dragGaps'
+import { useFocusMode, setFocusModeEnabled, setFocusChromeVisible } from '../hooks/useFocusMode'
 
 import { i18nT } from '../i18n/t'
 // Refresh the embedded token once elapsed reaches this fraction of its TTL
@@ -86,6 +87,10 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
   // Stable array identity per pin change, so the model memo below does not
   // re-broadcast on every render.
   const pinnedCrews = useMemo(() => [...pinnedCrewSet], [pinnedCrewSet])
+  // Focus mode is a property of the WINDOW, not of one pane: a remote crew shown
+  // inside a focused window must hide its chrome too. Relayed down the host model
+  // below, and it also gates the host drag strips (see their render site).
+  const { enabled: focusMode } = useFocusMode()
 
   // Per-instance header drag gaps relayed up by each embedded pane
   // (mc-drag-gaps). Only the ACTIVE pane's gaps are rendered, but they are
@@ -110,6 +115,10 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
   // postMessage listener) always sees the latest ports without re-subscribing.
   const warmRef = useRef(warm)
   warmRef.current = warm
+  // Read inside the message listener rather than closed over: the listener is
+  // registered once, and only the ACTIVE pane may speak for the window's chrome.
+  const activeIdRef = useRef(activeId)
+  activeIdRef.current = activeId
   const refreshingRef = useRef<Set<string>>(new Set())
   const lastRefreshRef = useRef<Map<string, number>>(new Map())
   // Live iframe elements by id, so the parent can postMessage the switcher model
@@ -223,6 +232,23 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
         // panes) via the module store, keeping the set one shared value.
         const id = (data as { id?: unknown }).id
         if (typeof id === 'string' && id) toggleCrewPin(id)
+      } else if (data.type === 'mc-set-focus-mode') {
+        // Focus mode was toggled inside an embedded pane. It belongs to the WINDOW,
+        // not to one pane, so applying it here is what makes the state one shared
+        // value: the module store re-renders the local header's own toggle, and the
+        // model re-broadcast below carries it to every OTHER pane. The pane that
+        // sent it already adopted it locally, and the setter is idempotent, so the
+        // return trip is a no-op rather than a loop.
+        const on = (data as { on?: unknown }).on
+        if (typeof on === 'boolean') setFocusModeEnabled(on)
+      } else if (data.type === 'mc-focus-chrome') {
+        // The pane reports whether ITS chrome is on screen. Only the pane the user
+        // is actually looking at may speak for the window: a background pane's peek
+        // must not summon the host's traffic lights over a different pane. The host
+        // is the only side that can act on this at all — the lights are AppKit
+        // views on this window and the drag bar lives in this document.
+        const on = (data as { on?: unknown }).on
+        if (typeof on === 'boolean' && id === activeIdRef.current) setFocusChromeVisible(on)
       } else if (data.type === 'mc-embedded-ready') {
         // The pane just (re)mounted and asked for the current model — send it now
         // rather than waiting for the next input-driven broadcast. Also record
@@ -391,14 +417,14 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
           }
         : null
       return {
-        type: 'mc-host-model', v: 1, tabs, activeId, self, macInset,
+        type: 'mc-host-model', v: 1, tabs, activeId, self, macInset, focusMode,
         electron: isElectron,
         // Array, not the Set itself: structured clone rejects a Set across this
         // boundary in some engines and the receiver validates element-wise anyway.
         pinnedCrews,
       }
     },
-    [instancesQuery.data, warm, unread, activeId, macInset, pinnedCrews],
+    [instancesQuery.data, warm, unread, activeId, macInset, focusMode, pinnedCrews],
   )
 
   // Post the model into one embedded pane, addressed to its exact loopback
@@ -499,7 +525,13 @@ export default function InstancesViewport({ macInset = false }: { macInset?: boo
           loading/error overlays, which carry their own interactive tab strip).
           Each strip sits in a control-free gap the pane measured, so it never
           swallows a header button's clicks. */}
-      {isElectron && activeId && !showPanel && !showLoading && !!warm[activeId] && activeReady &&
+      {/* Host-rendered drag strips over the pane's own header gaps. Suppressed
+          entirely in focus mode: the pane hides its header to match the host, so
+          there is no header left to drag by — and these strips are
+          `-webkit-app-region: drag`, which the compositor resolves BEFORE
+          hit-testing, so leaving them up would make the pane's top band answer
+          neither hover nor clicks and its own chrome could never be peeked back. */}
+      {isElectron && !focusMode && activeId && !showPanel && !showLoading && !!warm[activeId] && activeReady &&
         (dragGaps[activeId] ?? []).map((g, i) => {
           // Stay clear of the caption controls at the right edge: Windows'
           // native titleBarOverlay buttons, or frameless Linux's injected

@@ -3,6 +3,7 @@ import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithProviders, createTestStore } from './helpers'
 import InstancesViewport from '../components/InstancesViewport'
+import { setActiveId } from '../store/instancesSlice'
 
 // Prevent happy-dom from scheduling a real iframe fetch task when src is set.
 // The component sets `<iframe src="http://localhost:7778/?token=tok">` which
@@ -27,6 +28,14 @@ HTMLIFrameElement.prototype.setAttribute = function (name: string, value: string
   origSetAttribute.call(this, name, value)
 }
 afterAll(() => { HTMLIFrameElement.prototype.setAttribute = origSetAttribute })
+
+// The host drag strips only render under the Electron shell, so the focus-mode
+// suppression test needs that to be true. Only `isElectron` is overridden; the
+// per-platform flags and caption widths keep their real values.
+vi.mock('../lib/electron', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/electron')>()),
+  isElectron: true,
+}))
 
 vi.mock('../lib/embedded', () => ({ isEmbeddedPane: vi.fn(() => false) }))
 import { isEmbeddedPane } from '../lib/embedded'
@@ -378,6 +387,110 @@ describe('InstancesViewport', () => {
     expect(bar).toBeInTheDocument()
     // Not the error panel — no Retry while the load is still in flight.
     expect(screen.queryByText(/Connection error/i)).toBeNull()
+  })
+
+  it('suppresses the host drag strips in focus mode so the pane can peek its own chrome', async () => {
+    // The strips are `-webkit-app-region: drag`, which the compositor resolves
+    // BEFORE hit-testing. In focus mode the pane hides its own header to match the
+    // host, so there is no header left to drag by — and leaving the strips up makes
+    // the pane's top band answer neither hover nor clicks, so its chrome can never
+    // be summoned back. This is the bug reported on the desktop app: switching to a
+    // remote crew left the top region drag-only and dead.
+    const { setFocusModeEnabled } = await import('../hooks/useFocusMode')
+    mockConnectedCd1()
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {}, ready: { 'cd-1': true } },
+    })
+    renderWithProviders(<InstancesViewport />, { store })
+
+    // The pane reports the gaps in its own header that the host may drag by.
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'mc-drag-gaps', v: 1, gaps: [{ x: 100, w: 300 }] },
+        origin: 'http://127.0.0.1:7778',
+      }))
+    })
+    await waitFor(() => expect(document.querySelectorAll('.host-drag-strip').length).toBeGreaterThan(0))
+
+    await act(async () => { setFocusModeEnabled(true) })
+    await waitFor(() => expect(document.querySelectorAll('.host-drag-strip').length).toBe(0))
+
+    await act(async () => { setFocusModeEnabled(false) })
+    await waitFor(() => expect(document.querySelectorAll('.host-drag-strip').length).toBeGreaterThan(0))
+  })
+
+  it('adopts focus mode from a pane and shares it back across every pane', async () => {
+    // Focus mode belongs to the WINDOW, so a toggle driven inside one pane has to
+    // become the host's value too — that is what makes the top-bar icon agree and
+    // what carries the state to the OTHER panes on the next model broadcast. The
+    // reverse direction (host -> pane) rides `mc-host-model.focusMode`.
+    const { focusModeEnabled, __resetFocusMode } = await import('../hooks/useFocusMode')
+    __resetFocusMode()
+    mockConnectedCd1()
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {}, ready: { 'cd-1': true } },
+    })
+    renderWithProviders(<InstancesViewport />, { store })
+
+    expect(focusModeEnabled()).toBe(false)
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'mc-set-focus-mode', v: 1, on: true },
+        origin: 'http://127.0.0.1:7778',
+      }))
+    })
+    await waitFor(() => expect(focusModeEnabled()).toBe(true))
+
+    // A malformed payload from a pane must not flip window state.
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'mc-set-focus-mode', v: 1, on: 'yes' },
+        origin: 'http://127.0.0.1:7778',
+      }))
+    })
+    expect(focusModeEnabled()).toBe(true)
+    __resetFocusMode()
+  })
+
+  it('takes chrome visibility from the ACTIVE pane only', async () => {
+    // A pane's peeked header is the only thing on screen when that pane fills the
+    // window, so the host has to act on its report — the traffic lights are AppKit
+    // views on THIS window and the pane cannot touch them. But only the active
+    // pane may speak: a background pane's peek must not summon the lights over a
+    // different pane's content.
+    const { focusChromeVisible, setFocusChromeVisible, __resetFocusMode } = await import('../hooks/useFocusMode')
+    __resetFocusMode()
+    setFocusChromeVisible(false)
+    mockConnectedCd1()
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'tok' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {}, ready: { 'cd-1': true } },
+    })
+    renderWithProviders(<InstancesViewport />, { store })
+
+    expect(focusChromeVisible()).toBe(false)
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'mc-focus-chrome', v: 1, on: true },
+        origin: 'http://127.0.0.1:7778',
+      }))
+    })
+    await waitFor(() => expect(focusChromeVisible()).toBe(true))
+
+    // A report from a pane that is NOT active is ignored.
+    setFocusChromeVisible(false)
+    // Separate act: the component tracks the active id in a ref written during
+    // render, so the switch has to COMMIT before the message is delivered —
+    // otherwise the listener still sees cd-1 as active and the test would pass
+    // for the wrong reason.
+    await act(async () => { store.dispatch(setActiveId(null)) })
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', {
+        data: { type: 'mc-focus-chrome', v: 1, on: true },
+        origin: 'http://127.0.0.1:7778',
+      }))
+    })
+    expect(focusChromeVisible()).toBe(false)
+    __resetFocusMode()
   })
 
   it('dismisses the loading overlay when the pane posts mc-embedded-ready from its tunnel origin', async () => {

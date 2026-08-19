@@ -1802,6 +1802,70 @@ file-tree-container{
    chips are clickable, hoverable, and drag-reorderable. Ignored in browsers. */
 .side-panel-strip,.side-panel-strip *{-webkit-app-region:no-drag}
 
+/* Focus-mode edge triggers. The drag region itself collapses with the header
+   (the body.mc-focus-mode rules in electron/main.js), so the strips are reachable
+   while the chrome is hidden. This rule covers the other half: once the header is
+   REVEALED the bar is 42px again and the top strip sits inside it, and a bare div
+   there would be a window-drag region whose hover never reaches React — which is
+   what the close-grace period needs to keep the header on screen.
+   `pointer-events:none` does NOT help (that is why .host-drag-strip below still
+   drags); only no-drag does. Ignored in browsers, where there is no native
+   window to drag. */
+/* Focus-mode edge triggers. A generous 20px target: at 8px it sat flush with the
+   window edge, which is also where the OS puts its own resize affordance, so it was
+   easy to overshoot and miss.
+
+   The size is CONSTANT. An earlier version shrank the strip to 8px on reveal so it
+   would stop covering the top of the revealed header's controls, and that produced
+   a hover feedback loop: the strip resized out from under a stationary pointer,
+   which fired mouseleave, which started the close grace, which closed the chrome,
+   which grew the strip back under the pointer, which re-opened it — flickering
+   indefinitely without the user moving the mouse. Anything that changes the hit
+   target under a resting pointer can oscillate like that, so the strip is instead
+   COVERED by the chrome it summons (z-61 against the chrome's z-62): while the
+   chrome is up, hover and clicks land on the header or rail, which keeps them open
+   through their own surface handlers, and nothing resizes. */
+.focus-peek-top{height:20px}
+.focus-peek-rail{width:20px}
+
+/* no-drag only while the chrome is HIDDEN. While it is shown the header itself is
+   the window-drag surface (below), and a no-drag strip laid over its top 20px could
+   only subtract from that band. Hidden, the injected drag bar is collapsed to 0
+   anyway, so this is a backstop rather than load-bearing. */
+body.mc-focus-mode:not(.mc-focus-chrome) .focus-peek-top{-webkit-app-region:no-drag}
+body.mc-focus-mode:not(.mc-focus-rail) .focus-peek-rail{-webkit-app-region:no-drag}
+
+/* The revealed header is a window-drag surface in its empty regions, the same way
+   `.win-electron header.topbar-glass` already makes the docked header one on
+   Windows.
+   Marked on the HEADER rather than left to Electron's injected #electron-drag-bar:
+   that bar is collapsed to 0 in focus mode (it has to be — see the rules in
+   electron/main.js) and re-expanding it by class turned out not to restore drag,
+   so the header owns its own region instead of depending on that. The injected
+   sheet already marks every control no-drag globally, which is what keeps the
+   search trigger, the toggle and the readouts clickable. */
+body.mc-focus-mode.mc-focus-chrome header.topbar-glass{-webkit-app-region:drag}
+
+/* Focus mode: the peeked chrome FLOATS over content instead of sitting above a
+   flat background, which is a different rendering problem from the docked case.
+   .topbar-glass is `color-mix(in srgb, var(--chrome) 74%, transparent)` — 26%
+   see-through. Docked there is nothing behind it but --bg, so that reads as a
+   tint; as an overlay the transcript shows straight through the blur and the
+   header's own text becomes hard to read. Opaque while floating.
+   The reduced-transparency / high-contrast fallbacks further down force an opaque
+   background with !important, so they still win — which is the same answer. */
+body.mc-focus-mode header.topbar-glass{background:var(--chrome)}
+
+/* The drop shadows are gated on the surface actually being ON SCREEN. Both the
+   header and the rail stay MOUNTED and slide out of view, so an always-on shadow
+   keeps painting its tail into the content: this shadow reaches 28px past the
+   box, and a header translated up by its own 42px leaves that tail sitting over
+   the top of the transcript as a permanent smudge. */
+body.mc-focus-mode.mc-focus-chrome header.topbar-glass{
+  box-shadow:0 10px 28px -10px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.10)}
+body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
+  box-shadow:0 10px 28px -10px rgba(0,0,0,.5)}
+
 /* Draggable title-bar strips laid over a remote-instance pane. The pane is a
    cross-origin iframe, so the host's injected #electron-drag-bar can't reach
    into it and the blanket marks the whole iframe no-drag — the pane's header

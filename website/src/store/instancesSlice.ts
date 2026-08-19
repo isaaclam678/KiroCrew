@@ -52,6 +52,11 @@ export interface HostModel {
   /** True when the parent is a macOS Electron window not in fullscreen, so the
    *  embedded header must inset its content clear of the native traffic lights. */
   macInset: boolean
+  /** True when the parent window is in focus mode, so the pane should hide its own
+   *  chrome to match instead of landing fully-framed inside a focused window. The
+   *  pane's OWN `mc-focus-mode` setting is left untouched — this is the host's view
+   *  preference, and the pane has its own localStorage (cross-origin iframe). */
+  focusMode: boolean
   /** True when the parent shell is Electron. Gates the embedded ⌘/Ctrl+digit
    *  instance-switch chord: in a plain browser those chords are reserved for
    *  browser tab switching, so the pane must not bind (or advertise) them. */

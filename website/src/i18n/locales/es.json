@@ -34,6 +34,7 @@
     "expand_sidebar": "Expandir la barra lateral",
     "explore": "Explorar",
     "explore_apps": "Explorar apps",
+    "focus_mode": "Modo de concentración",
     "gateway_connected": "Gateway conectado",
     "gateway_offline": "Gateway sin conexión",
     "gateway_offline_reconnecting": "Gateway sin conexión — reconectando",
@@ -6841,6 +6842,7 @@
       "schedule_panel": "Panel de programación",
       "switch_to_local": "Cambiar a Local",
       "switch_to_remote_crew": "Cambiar al crew remoto {{n}}",
+      "toggle_focus_mode": "Activar o desactivar el modo de concentración",
       "walk_back_mru_history": "Retroceder por el historial MRU"
     },
     "usePanelTabs": {

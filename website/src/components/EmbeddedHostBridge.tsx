@@ -20,6 +20,7 @@ import { useEffect } from 'react'
 import { useAppDispatch } from '../store'
 import { setHostModel, type HostModel } from '../store/instancesSlice'
 import { isEmbeddedPane } from '../lib/embedded'
+import { setFocusModeEnabled } from '../hooks/useFocusMode'
 
 const MAC_INSET_CLASS = 'embedded-mac-inset'
 
@@ -52,6 +53,7 @@ function parseHostModel(data: unknown): HostModel | null {
     activeId: typeof d.activeId === 'string' ? d.activeId : null,
     self,
     macInset: !!d.macInset,
+    focusMode: !!d.focusMode,
     electron: !!d.electron,
     // Element-wise validation, not a blind cast: this crosses a postMessage
     // boundary, so a malformed or hostile payload must degrade to "nothing
@@ -75,6 +77,10 @@ export default function EmbeddedHostBridge() {
       if (!model) return
       dispatch(setHostModel(model))
       document.documentElement.classList.toggle(MAC_INSET_CLASS, model.macInset)
+      // Adopt the host window's focus mode. `echo: false` because this IS the
+      // relayed value — sending it back up is what would make the two frames
+      // ping-pong. A toggle the user drives inside this pane still echoes.
+      setFocusModeEnabled(model.focusMode, { echo: false })
     }
     window.addEventListener('message', onMessage)
     // Announce readiness so the parent (re)sends the current model even if its
@@ -89,6 +95,7 @@ export default function EmbeddedHostBridge() {
     return () => {
       window.removeEventListener('message', onMessage)
       document.documentElement.classList.remove(MAC_INSET_CLASS)
+      setFocusModeEnabled(false, { echo: false })
       dispatch(setHostModel(null))
     }
   }, [dispatch])
