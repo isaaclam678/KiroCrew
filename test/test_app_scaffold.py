@@ -2,9 +2,56 @@
 from __future__ import annotations
 
 import json
+import struct
+import zlib
 
 from kiro_crew.apps.manifest import AppManifest
-from kiro_crew.apps.scaffold import scaffold_app
+from kiro_crew.apps.scaffold import _placeholder_icon_png, scaffold_app
+
+
+class TestPlaceholderIcon:
+    """The scaffolded store icon, pinned against the publishing guide's spec.
+
+    A scaffolded app that reaches the App Store catalog with no icon publishes a
+    generated placeholder card, indistinguishable from an icon the publish
+    pipeline dropped -- so it reads as a store bug rather than an incomplete
+    manifest. These pin the shape the guide actually requires, so a change here
+    cannot silently produce an icon the store rejects.
+    """
+
+    def test_is_a_png(self):
+        assert _placeholder_icon_png()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_is_the_square_512_the_guide_asks_for(self):
+        width, height = struct.unpack(">II", _placeholder_icon_png()[16:24])
+        assert width == height == 512
+
+    def test_carries_no_alpha_channel(self):
+        """Colour type 2 is truecolor RGB. The guide requires an opaque icon, so
+        an alpha channel would model a freedom the icon cannot use."""
+        assert _placeholder_icon_png()[25] == 2
+
+    def test_stays_small(self):
+        """Two flat colours should compress to nothing; a regression that
+        inflates this would otherwise be silent."""
+        assert len(_placeholder_icon_png()) < 8 * 1024
+
+    def test_is_byte_identical_across_calls(self):
+        """One known digest stays recognisable as 'still the placeholder'."""
+        assert _placeholder_icon_png() == _placeholder_icon_png()
+
+    def test_pixels_decode_to_the_intended_plate(self):
+        """Cheap proof the scanline filter byte and row stride are right: a wrong
+        stride still produces a file every header check above accepts."""
+        data = _placeholder_icon_png()
+        raw = zlib.decompress(data[data.index(b"IDAT") + 4 : -12])
+        stride = 1 + 512 * 3
+        assert len(raw) == 512 * stride
+        middle = raw[256 * stride : 257 * stride]
+        assert middle[0] == 0, "scanline filter type must be None"
+        assert tuple(middle[1:4]) == (46, 52, 64), "row starts in the field"
+        centre = 1 + 256 * 3
+        assert tuple(middle[centre : centre + 3]) == (67, 76, 94), "plate inside"
 
 
 class TestScaffold:
@@ -20,6 +67,80 @@ class TestScaffold:
         m = AppManifest.from_json_file(app_dir / "app.json")
         assert m.name == "my-test-app"
         assert m.validate() == []
+
+    def test_store_icon_exists_and_is_declared(self, tmp_path):
+        """Both halves together. The bytes without the manifest key are an unused
+        file; the key without the bytes is a broken reference, which publishes
+        worse than declaring nothing at all."""
+        app_dir = scaffold_app(tmp_path, "icon-app")
+        icon = app_dir / "assets" / "icon.png"
+        assert icon.is_file()
+        assert icon.read_bytes() == _placeholder_icon_png()
+        manifest = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+        assert manifest["iconPath"] == "assets/icon.png"
+
+    def test_icon_path_resolves_from_the_app_root(self, tmp_path):
+        """`iconPath` is repo-relative, so it must resolve against the app
+        directory exactly as written -- no leading slash, no `ui/` prefix."""
+        app_dir = scaffold_app(tmp_path, "resolve-app")
+        declared = json.loads((app_dir / "app.json").read_text(encoding="utf-8"))
+        assert (app_dir / declared["iconPath"]).is_file()
+
+    def test_rerun_does_not_destroy_a_replaced_icon(self, tmp_path):
+        """Every other scaffolded file is GENERATED and reproduced from the same
+        arguments, so overwriting costs nothing. This one becomes the developer's
+        artwork the moment they replace it -- which is the point of scaffolding it
+        -- so a second `app init` must not overwrite their icon."""
+        app_dir = scaffold_app(tmp_path, "rerun-app")
+        icon = app_dir / "assets" / "icon.png"
+        icon.write_bytes(b"\x89PNG\r\n\x1a\nnot-the-placeholder")
+
+        scaffold_app(tmp_path, "rerun-app")
+        assert icon.read_bytes() == b"\x89PNG\r\n\x1a\nnot-the-placeholder"
+
+    def test_icon_write_refuses_to_follow_an_escaping_symlink(self, tmp_path):
+        """`exists()` is False for a DANGLING symlink, so an unresolved existence
+        test would fall through to a write that follows the link out of the app
+        directory. Containment is checked on the resolved path."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "pwned.png"
+
+        app_dir = tmp_path / "out" / "link-app"
+        (app_dir / "assets").mkdir(parents=True)
+        (app_dir / "assets" / "icon.png").symlink_to(target)
+
+        scaffold_app(tmp_path / "out", "link-app")
+        assert not target.exists(), "write escaped the app directory"
+
+    def test_icon_write_refuses_an_escaping_assets_symlink(self, tmp_path):
+        """The same escape one level up: `assets` itself is the symlink, so the
+        joined path looks contained while the resolved one is not."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        app_dir = tmp_path / "out" / "linkdir-app"
+        app_dir.mkdir(parents=True)
+        (app_dir / "assets").symlink_to(outside, target_is_directory=True)
+
+        scaffold_app(tmp_path / "out", "linkdir-app")
+        assert not (outside / "icon.png").exists(), "write escaped the app directory"
+
+    def test_icon_ships_without_the_optional_ui(self, tmp_path):
+        """The store icon is about being LISTED, not about having a UI, so it
+        must not ride along on `include_ui`."""
+        app_dir = scaffold_app(tmp_path, "headless-app")
+        assert not (app_dir / "ui").exists()
+        assert (app_dir / "assets" / "icon.png").is_file()
+
+    def test_readme_points_at_the_placeholder(self, tmp_path):
+        """The generated tree is where a developer learns the file is theirs to
+        replace; a placeholder nobody knows to replace ships as the real icon."""
+        readme = (scaffold_app(tmp_path, "tree-app") / "README.md").read_text(
+            encoding="utf-8"
+        )
+        assert "assets/" in readme
+        assert "replace this placeholder" in readme
 
     def test_scaffold_with_backend(self, tmp_path):
         app_dir = scaffold_app(tmp_path, "backend-app", include_backend=True)

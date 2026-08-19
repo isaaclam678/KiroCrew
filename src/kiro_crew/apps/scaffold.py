@@ -7,9 +7,66 @@ from __future__ import annotations
 
 import json
 import logging
+import struct
+import zlib
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+#: Geometry and palette of the scaffolded placeholder icon: a plate inset in a
+#: darker field, at the size the publishing guide asks for and neutral enough to
+#: read on both a light and a dark card.
+_ICON_PX = 512
+_ICON_INSET = 128
+_ICON_FIELD = (46, 52, 64)
+_ICON_PLATE = (67, 76, 94)
+
+
+def _placeholder_icon_png() -> bytes:
+    """Encode the placeholder store icon, standard library only.
+
+    Pillow is not a dependency of this path, and taking one on so that
+    ``app init`` can draw a rectangle would be a poor trade: a PNG is a signature
+    followed by length-tag-payload-CRC chunks, so emitting one directly is
+    shorter than the argument for the dependency would be.
+
+    Truecolor (colour type 2), not RGBA. The publishing guide requires an opaque
+    icon -- an opaque tile carries its own background, which is what makes the
+    dark variant optional rather than a latent bug -- so carrying an alpha
+    channel would model a degree of freedom the icon is not allowed to use.
+
+    The bytes are identical for every app, which is deliberate: a single known
+    digest stays recognisable as "still the placeholder", which a per-app colour
+    would trade away for nothing.
+    """
+    field = bytes(_ICON_FIELD) * _ICON_PX
+    margin = bytes(_ICON_FIELD) * _ICON_INSET
+    plate = bytes(_ICON_PLATE) * (_ICON_PX - 2 * _ICON_INSET)
+    raw = bytearray()
+    for y in range(_ICON_PX):
+        # Leading byte is the scanline filter type: 0, meaning the row is stored
+        # as-is. Every row is a run of at most two colours, which deflate folds
+        # down to well under a kilobyte.
+        inside = _ICON_INSET <= y < _ICON_PX - _ICON_INSET
+        raw += b"\x00" + (margin + plate + margin if inside else field)
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    # width, height, bit depth, colour type, compression, filter, interlace
+    ihdr = struct.pack(">IIBBBBB", _ICON_PX, _ICON_PX, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+
 
 _MANIFEST_TEMPLATE = {
     "name": "",
@@ -17,6 +74,12 @@ _MANIFEST_TEMPLATE = {
     "displayName": "",
     "description": "",
     "author": "",
+    # The store's card and row icon, repo-relative. Scaffolded rather than left
+    # to the publishing guide: a field nobody knows exists is a field nobody
+    # fills, and an entry that reaches the catalog without one renders as a
+    # generated placeholder that looks like a store bug rather than an
+    # incomplete manifest.
+    "iconPath": "assets/icon.png",
     "agents": ["agents/sample-agent.json"],
     "skills": ["skills/sample-skill"],
     "tags": [],
@@ -197,6 +260,8 @@ take effect on next agent invocation. Backend changes require restart.
 ```
 {name}/
 ├── app.json              ← manifest
+├── assets/
+│   └── icon.png          ← store icon; replace this placeholder
 ├── agents/               ← agent definitions
 │   └── sample-agent.json
 ├── skills/               ← skill files
@@ -269,6 +334,31 @@ def scaffold_app(
     (app_dir / "app.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+
+    # Store icon. Real bytes, not just the manifest key: an `iconPath` naming a
+    # file that does not exist publishes worse than naming nothing, because the
+    # store's fallback is identical either way and the developer gets a broken
+    # reference instead of a working default. Shipping a valid opaque square
+    # makes an iconless app a state someone has to CREATE by deleting this, not
+    # one they fall into by never reading the publishing guide.
+    #
+    # Written only when absent, unlike every other file here. The rest are
+    # GENERATED -- re-running `app init` reproduces them from the same arguments,
+    # so overwriting costs nothing. This one is the developer's ARTWORK the moment
+    # they replace it, which is the entire point of scaffolding it, so an
+    # unconditional write would make a second `app init` destroy the icon.
+    assets_dir = app_dir / "assets"
+    assets_dir.mkdir(exist_ok=True)
+    # Resolve before BOTH the existence test and the write. `exists()` is False for a
+    # DANGLING symlink, so testing the joined path would fall through to a write that
+    # follows the link and lands outside the app; a symlinked `assets` escapes the
+    # same way. Both sides are resolved so a symlink in the user's own `--dir` (a
+    # symlinked home, /tmp on macOS) compares equal instead of reading as an escape.
+    icon = (assets_dir / "icon.png").resolve()
+    if not icon.is_relative_to(app_dir.resolve()):
+        logger.warning("refusing to write an icon outside %s: %s", app_dir, icon)
+    elif not icon.exists():
+        icon.write_bytes(_placeholder_icon_png())
 
     # Agent
     agents_dir = app_dir / "agents"
