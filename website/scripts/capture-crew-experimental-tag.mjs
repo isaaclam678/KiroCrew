@@ -7,12 +7,18 @@
  *      vitest spec asserts the tag is inside the crew menu item and not the
  *      autopilot one; it cannot say whether the row reads as a caution or as
  *      decoration next to a 13px label.
- *   2. It survives a long localised label. The menu is `max-w-[264px]` and the
- *      English row already measures ~257px, so the margin is single-digit and
- *      any wider locale must wrap rather than clip. The title row is
- *      `flex-wrap` for exactly that, and wrapping is a layout outcome jsdom
- *      does not compute (no box model, so `flex-wrap` never wraps there) — it
- *      can only be measured in a real engine.
+ *   2. It survives a long localised label. The menu settles at its
+ *      `max-w-[264px]` bound in every locale, but NOT because of the tag: the
+ *      two mode descriptions are wrapping sentences that fill the width on their
+ *      own, so this row's real budget is the ~208px of item content box inside
+ *      it. The title row is `flex-wrap` so a label that outgrows that budget
+ *      drops the tag to a second line instead of overflowing, and wrapping is a
+ *      layout outcome jsdom does not compute (no box model, so `flex-wrap` never
+ *      wraps there) — it can only be measured in a real engine.
+ *
+ *      As shipped the wrap is insurance and stays unexercised: the longest of
+ *      the twelve labels still fits on one line. What this pass therefore proves
+ *      is the absence of clipping, not the presence of a wrap.
  *
  *      The third pass uses `es`, whose "Nuevo chat de Crew Mode" is the longest
  *      of the twelve shipped labels. NOT the `en-XA` pseudolocale, which would
@@ -70,6 +76,37 @@ const extra = (path, route) => {
  * entry, whose `data-testid` is the only locale-invariant handle in the menu.
  * Returns the menu locator so the caller can shoot it directly.
  */
+/**
+ * Wait until the menu's entry animation has actually finished.
+ *
+ * `DropdownMenuContent` enters with `fade-in-0 zoom-in-95 slide-in-from-top-2`,
+ * and `waitFor({ state: 'visible' })` resolves on the FIRST frame of that — so a
+ * shot taken there catches a 95%-scaled, part-transparent, still-sliding menu.
+ * It also corrupts measurement: `getBoundingClientRect()` returns the visually
+ * SCALED box, so the same English menu measured 252px on one pass and 257px on
+ * another. `zoom-in-95` is the whole discrepancy (252/265 ~ 0.951).
+ *
+ * Awaiting `getAnimations({ subtree: true })` rather than sleeping a fixed
+ * number of ms: tailwindcss-animate uses real CSS keyframe animations, which the
+ * Web Animations API reports, so this settles exactly when they end instead of
+ * guessing a duration that a future easing change would invalidate. The
+ * geometry-stability pass afterwards covers anything the API does not report.
+ */
+async function settleAnimations(page, menu) {
+  await menu.evaluate(el => Promise.all(
+    el.getAnimations({ subtree: true }).map(a => a.finished.catch(() => {})),
+  ))
+  // Two consecutive frames at the same width before believing it.
+  let last = -1
+  for (let i = 0; i < 30; i++) {
+    const w = await menu.evaluate(el => el.getBoundingClientRect().width)
+    if (Math.abs(w - last) < 0.01) return
+    last = w
+    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))
+  }
+  throw new Error(`menu geometry never stabilised (last ${last}px)`)
+}
+
 async function openCreateMenu(page) {
   const triggers = page.locator('button[aria-haspopup="menu"]')
   const n = await triggers.count()
@@ -125,6 +162,20 @@ async function main() {
 
       await page.goto(base, { waitUntil: 'networkidle' })
       const menu = await openCreateMenu(page)
+      await settleAnimations(page, menu)
+
+      // Assert the settled state directly, so a future change that reintroduces
+      // mid-flight capture fails here instead of quietly shipping a blurred shot.
+      const anim = await menu.evaluate(el => {
+        const cs = getComputedStyle(el)
+        return { opacity: cs.opacity, transform: cs.transform, running: el.getAnimations({ subtree: true }).length }
+      })
+      if (anim.opacity !== '1') throw new Error(`${label}: menu opacity ${anim.opacity}, animation unfinished`)
+      if (!['none', 'matrix(1, 0, 0, 1, 0, 0)'].includes(anim.transform)) {
+        throw new Error(`${label}: menu transform ${anim.transform}, still scaled/sliding`)
+      }
+      if (anim.running !== 0) throw new Error(`${label}: ${anim.running} animation(s) still attached`)
+
       const crewItem = page.locator('[data-testid="new-crew-chat"]').first()
       const tag = crewItem.locator('[data-testid="crew-experimental-tag"]')
 
