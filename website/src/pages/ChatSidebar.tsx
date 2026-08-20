@@ -47,6 +47,7 @@ import { usePointerDrag } from '../hooks/usePointerDrag'
 import { safeSetItem } from '../utils/safeStorage'
 import { resolveFolderAgent, resolveFolderProjectDir } from '../utils/folderAgent'
 import FolderMoveSubmenu from '../components/FolderMoveSubmenu'
+import SessionMoveUndoBar, { MOVE_UNDO_MS, type MovedSession } from '../components/SessionMoveUndoBar'
 import SessionActionsMenu from '../components/SessionActionsMenu'
 import { ChannelBrandIcon, hasChannelBrandIcon } from '../components/ChannelBrandIcon'
 import TagManagerList from '../components/TagManagerList'
@@ -2655,6 +2656,71 @@ function ChatSidebar({
   // drag-to-folder) — single source of truth for slot→folder assignment. Both
   // the menu "Move to folder" submenus and drag-to-folder route through this.
   const assignToFolder = useMoveSlotToFolder()
+  // ── Drag-move undo ────────────────────────────────────────────────────────
+  // A drag is the one folder move the user can make WITHOUT naming the
+  // destination: drop a session a row off and it disappears into a folder they
+  // never chose, with nothing on screen saying where it went. So every
+  // DRAG-initiated move parks its inverse here and the bar below the lanes
+  // offers it back. Menu moves ("Move to folder…") pick the destination by name
+  // and do not arm it.
+  //
+  // `live` is the offer's ONE-WAY lifecycle. It flips true when the store first
+  // shows the session in the destination (the move is optimistic, so that is a
+  // tick after the drop), and once true the offer is DROPPED — never
+  // re-validated — the moment live state stops matching. Deriving the bar's
+  // visibility from live state instead let a dropped offer come back: drag A→B,
+  // then move B→C→B from a row menu, and the old A inverse matched again and
+  // would have overwritten the newer, intentional move.
+  const [dragMove, setDragMove] = useState<(MovedSession & { id: number; live: boolean }) | null>(null)
+  const moveByDrag = useCallback((slotKey: string, folderId: string | null) => {
+    const slot = slots.find(s => s.key === slotKey)
+    const from = slot?.folder_id || null
+    const to = folderId || null
+    // A drop back onto the folder the session already sits in is not a move —
+    // arming undo for it would offer to undo nothing.
+    if (from === to) return
+    assignToFolder(slotKey, to)
+    const dest = to ? folders.find(f => f.id === to) : undefined
+    setDragMove({
+      id: Date.now(),
+      live: false,
+      slotKey,
+      fromFolderId: from,
+      toFolderId: to,
+      toFolderName: dest?.name ?? null,
+      toFolderColor: dest?.color,
+      sessionTitle: slot?.title || slotKey,
+    })
+  }, [slots, folders, assignToFolder])
+  const undoDragMove = useCallback(() => {
+    if (!dragMove) return
+    assignToFolder(dragMove.slotKey, dragMove.fromFolderId)
+    setDragMove(null)
+  }, [dragMove, assignToFolder])
+  // The deadline lives HERE, not in the bar: an offer whose optimistic move
+  // never became visible (the request failed and rolled back) has no bar to run
+  // a timer, and must still die on the same clock rather than linger where a
+  // later, unrelated move could make it match again.
+  useEffect(() => {
+    if (!dragMove) return
+    const timer = setTimeout(() => setDragMove(null), MOVE_UNDO_MS)
+    return () => clearTimeout(timer)
+    // Keyed on the offer's id ALONE: flipping `live` must not restart the clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragMove?.id])
+  useEffect(() => {
+    if (!dragMove) return
+    const slot = slots.find(s => s.key === dragMove.slotKey)
+    if (!slot) { setDragMove(null); return }   // session closed — nothing to put back
+    const here = slot.folder_id || null
+    if (!dragMove.live) {
+      if (here === dragMove.toFolderId) {
+        setDragMove(m => (m && m.id === dragMove.id ? { ...m, live: true } : m))
+      }
+      return                                   // optimistic write not visible yet
+    }
+    if (here !== dragMove.toFolderId) setDragMove(null)
+  }, [dragMove, slots])
   // Surface-agnostic session actions (duplicate/read/pin/copy/move/close) shared
   // by all three row menus AND the row's non-menu buttons (Duplicate/Close) so
   // each behaviour has one definition. Rename + Tags stay local (they drive this
@@ -2715,10 +2781,10 @@ function ChatSidebar({
         })
         return
       }
-      if (o?.type === 'folder-drop') assignToFolder(a.key, o.folderId ?? null)
-      else if (o?.type === 'folder') assignToFolder(a.key, over.id as string)
+      if (o?.type === 'folder-drop') moveByDrag(a.key, o.folderId ?? null)
+      else if (o?.type === 'folder') moveByDrag(a.key, over.id as string)
     }
-  }, [reorderFolders, assignToFolder, moveFolderTo, slots, activeSlot, onDropSessionRef])
+  }, [reorderFolders, moveByDrag, moveFolderTo, slots, activeSlot, onDropSessionRef])
   const handleSidebarDragCancel = useCallback(() => { setActiveDrag(null); setDragFrozen(false); if (dragExpandTimer.current) { clearTimeout(dragExpandTimer.current.timer); dragExpandTimer.current = null } }, [])
   // Auto-expand collapsed folders when a dragged item hovers over them for 500ms.
   const dragExpandTimer = useRef<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null)
@@ -2914,7 +2980,7 @@ function ChatSidebar({
           e.preventDefault(); e.stopPropagation()
           e.currentTarget.classList.remove('ring-1', 'ring-accent')
           const k = e.dataTransfer.getData('text/plain')
-          if (k) assignToFolder(k, folder.id)
+          if (k) moveByDrag(k, folder.id)
         }}
       >
         <div
@@ -4865,6 +4931,16 @@ function ChatSidebar({
           </div>
         )}
       </LayoutGroup>
+
+      {/* Drag-move confirmation + undo. Deliberately a SIBLING of the lanes and
+          a sibling ABOVE the separator, so it never covers the row that just
+          moved and never covers the persistent "Older Sessions" control — the
+          footer shifts down by its height while it is up. */}
+      <AnimatePresence initial={false}>
+        {dragMove?.live && (
+          <SessionMoveUndoBar key={dragMove.id} moved={dragMove} onUndo={undoDragMove} />
+        )}
+      </AnimatePresence>
 
       {/* When expanded: doubles as the resize handle (accent on hover, drag to resize, dbl-click to collapse).
           When collapsed: just a static 1px divider between sessions and the Older Sessions footer. */}
