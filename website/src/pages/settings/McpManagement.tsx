@@ -95,11 +95,13 @@ const STRENGTH_LABEL_KEY: Record<string, string> = {
 const REASON_LABEL_KEY: Record<string, string> = {
   observed_hazard: 'pages.mcpManagement.assessment.reason_observed_hazard',
   not_stdio: 'pages.mcpManagement.assessment.reason_not_stdio',
-  first_party_session_scoped: 'pages.mcpManagement.assessment.reason_first_party',
+  session_bound_by_construction:
+    'pages.mcpManagement.assessment.reason_session_bound_by_construction',
   rotating_secret_env: 'pages.mcpManagement.assessment.reason_rotating_secret_env',
   not_probed: 'pages.mcpManagement.assessment.reason_not_probed',
-  per_client_capability: 'pages.mcpManagement.assessment.reason_per_client_capability',
-  caller_sensitive_initialize: 'pages.mcpManagement.assessment.reason_caller_sensitive',
+  degrades_when_shared: 'pages.mcpManagement.assessment.reason_degrades_when_shared',
+  handshake_not_reproducible:
+    'pages.mcpManagement.assessment.reason_handshake_not_reproducible',
   declares_caller_identity: 'pages.mcpManagement.assessment.reason_declares_caller_identity',
   all_tools_read_only: 'pages.mcpManagement.assessment.reason_all_tools_read_only',
   preflight_passed: 'pages.mcpManagement.assessment.reason_preflight_passed',

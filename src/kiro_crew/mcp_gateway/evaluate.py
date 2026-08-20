@@ -267,7 +267,20 @@ async def _evaluate_pass(
         hit = cache.get(server.name, identities[server.name], reported_version(server))
         if hit is not None:
             known[server.name] = hit
-            continue
+            # Stored is not the same as settled. A divergent row is kept so the
+            # page can SHOW it -- the dashboard builds its rows from this cache
+            # and nothing else, so a result that is not stored is not merely
+            # forgotten, it is reported as "never measured" about a server we
+            # just spawned twice -- but it must not suppress a re-measure, being
+            # the one verdict two spawns cannot justify freezing (#4339). So it
+            # falls through to ``due`` and the next pass re-derives it, which is
+            # what lets a press clear a row that was wrong.
+            #
+            # It costs a budget slot every pass, exactly as an unmeasurable
+            # server already does, and for the same reason: the alternative is a
+            # permanent answer we cannot stand behind.
+            if not hit.caller_sensitive:
+                continue
         if getattr(server, "disabled", False) or not getattr(server, "command", ""):
             # A disabled server must not be spawned (probing is the act consent
             # gates), and a server with no command has no stdio pipe to stub.
@@ -339,6 +352,13 @@ async def _evaluate_pass(
             reported_version=reported_version(server),
         )
         if result.ran:
+            # Both outcomes are stored, including a divergence. Storing is what
+            # makes a result VISIBLE (the dashboard reads this cache and only this
+            # cache); what makes a divergence non-durable is that the loop above
+            # refuses to let such a row skip the next measurement. Separating
+            # those two meanings is the whole of the #4339 fix -- the earlier
+            # attempt withheld the row instead, which made the measurement
+            # invisible and had the page call the server unmeasured.
             cache.put(server.name, identities[server.name], verdict)
             measured += 1
         else:

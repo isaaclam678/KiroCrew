@@ -424,6 +424,64 @@ class TestEvaluateOnlyWhatChanged:
         assert len(fake.identities) == spawns
 
     @pytest.mark.asyncio
+    async def test_a_divergence_is_reported_but_never_frozen(
+        self, patch_probe, tmp_path
+    ) -> None:
+        """The #4339 fix, and the reason it needs no expiry clock.
+
+        Two spawns that disagree cannot say WHY they disagree: an answer computed
+        from ``clientInfo`` and an answer that varies for the server's own reasons
+        both look like this. Storing the guess turned one unlucky sample into a
+        permanent mark, because a stored row is skipped by every later pass.
+
+        So a divergence joins the branch above: reported for this pass, re-derived
+        on the next one. The server keeps costing two spawns, which is the honest
+        price of a question we cannot answer once and for all -- and it is exactly
+        what makes the measure button able to clear a wrong row.
+        """
+        from kiro_crew.mcp_gateway import evaluate as ev
+
+        fake = patch_probe(
+            {_ID_A: ("ok", {"tools": {}}), _ID_B: ("ok", {"prompts": {}})}
+        )
+
+        first = await ev.evaluate_new_servers([_server()], tmp_path)
+        assert first["srv"].ran is True, "it WAS measured"
+        assert first["srv"].caller_sensitive is True, "and the divergence is reported"
+        spawns = len(fake.identities)
+        assert spawns > 0
+
+        await ev.evaluate_new_servers([_server()], tmp_path)
+
+        assert len(fake.identities) > spawns, "a divergence must not suppress a re-measure"
+
+    @pytest.mark.asyncio
+    async def test_a_divergence_is_still_visible_to_the_page(
+        self, patch_probe, tmp_path
+    ) -> None:
+        """Not frozen must not mean not reported.
+
+        The dashboard builds its assessment rows from the verdict cache and from
+        nothing else -- both production callers of ``evaluate_new_servers`` discard
+        the returned dict. So a result withheld from the store is not merely
+        forgotten: the page calls the server UNMEASURED, about a server just
+        spawned twice, and the divergence note becomes unreachable in production.
+
+        Hence the split this test guards: the row is STORED so it can be shown, and
+        separately it never suppresses the next measurement.
+        """
+        from kiro_crew.mcp_gateway import evaluate as ev
+        from kiro_crew.mcp_gateway.verdict_cache import load_cache
+
+        patch_probe({_ID_A: ("ok", {"tools": {}}), _ID_B: ("ok", {"prompts": {}})})
+        await ev.evaluate_new_servers([_server()], tmp_path)
+
+        row = load_cache(tmp_path).get_by_name("srv")
+        assert row is not None, "the page reads this cache; an absent row reads as unmeasured"
+        assert row.ran is True
+        assert row.caller_sensitive is True
+
+    @pytest.mark.asyncio
     async def test_disabled_server_is_never_spawned(self, patch_probe, tmp_path) -> None:
         """Probing IS the act consent gates; a disabled row must not be provoked."""
         from kiro_crew.mcp_gateway import evaluate as ev
