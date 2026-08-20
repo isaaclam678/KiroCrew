@@ -6,6 +6,10 @@
  * the centered top-bar search overlay, so the overlay keeps its full width and
  * never unmounts.
  *
+ * A fourth scenario opens the menu instead, where the pin lives: one lit/unlit
+ * pin per crew row. It asserts that each destination owns exactly one named pin
+ * and that the lit ones are exactly the pinned crews.
+ *
  * Crews are pinned by DRIVING THE UI, not by seeding localStorage: the dashboard
  * does not carry a pre-seeded value across the reload the store would need to
  * observe it, and clicking the real menu rows proves the interaction as a
@@ -92,9 +96,12 @@ const SLOTS = [{
 
 const TRIGGER = '[aria-label^="Switch crew"]'
 const CHIP_ROW = '[data-testid="crew-chip-row"]'
+const PIN_ITEM = '[data-testid^="crew-pin-"]'
 const PINNED_KEY = 'mc-crew-switcher-pinned'
 
 const results = []
+/** Open-menu scenarios: the per-row pin toggles, which the header clip cannot see. */
+const menuResults = []
 
 async function main() {
   const { srv, base } = await serveDist()
@@ -137,8 +144,7 @@ async function main() {
    * @param name    output file stem
    * @param pinIds  crews to pre-pin
    */
-  async function scenario(name, pinIds, opts = {}) {
-    const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 2 })
+  async function scenario(name, pinIds, opts = {}) {    const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 2 })
     const page = await context.newPage()
     logPageProblems(page)
     // A crew reported `connected` makes InstancesViewport mount a warm pane
@@ -171,6 +177,43 @@ async function main() {
 
 
     await page.waitForTimeout(300)
+
+    // The pin lives ON each crew's row in the open menu, so that state is only
+    // photographable with the menu down — and the menu is portalled outside the
+    // header, so it needs its own clip rather than HEADER_CLIP.
+    if (opts.openMenu) {
+      await page.click(TRIGGER)
+      await page.waitForSelector(PIN_ITEM, { timeout: 10000 })
+      await page.waitForTimeout(250)
+      const menu = await page.evaluate(() => {
+        const items = [...document.querySelectorAll('[data-testid^="crew-pin-"]')]
+        const content = items[0]?.closest('[role="menu"]')
+        const r = content?.getBoundingClientRect()
+        return {
+          pins: items.map(el => ({
+            id: el.getAttribute('data-testid').replace('crew-pin-', ''),
+            checked: el.getAttribute('aria-checked'),
+            name: el.getAttribute('aria-label'),
+          })),
+          // One switch target per crew: the old design listed every crew a second
+          // time under a "Pin crews…" heading, which is what this replaces.
+          destinations: content ? content.querySelectorAll('[role="menuitemradio"]').length : 0,
+          box: r
+            ? { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+            : null,
+        }
+      })
+      menuResults.push({ name, expectedPinned: pinIds, ...menu })
+      await page.screenshot({
+        path: `${OUT}/${name}.png`,
+        clip: menu.box
+          ? { x: menu.box.x - 8, y: 0, width: menu.box.width + 16, height: menu.box.y + menu.box.height + 8 }
+          : HEADER_CLIP,
+      })
+      await page.close()
+      await context.close()
+      return
+    }
 
     // Geometry: does the switcher reach the centered search overlay?
     const geom = await page.evaluate(() => {
@@ -237,6 +280,10 @@ async function main() {
   //    that do not fit are cut at the row edge, marked by the fade.
   await scenario('03-overflow-clipped-with-fade', ['devdesk', 'prod', 'staging', 'sandbox'])
 
+  // 4. The menu itself: every row carries its own pin, lit for the two pinned
+  //    crews and unlit for the rest — one list of crews, not two.
+  await scenario('04-menu-row-pins', ['devdesk', 'sandbox'], { openMenu: true })
+
 
 
   await browser.close()
@@ -244,6 +291,29 @@ async function main() {
 
   console.log('--- geometry (the switcher must never reach the centered search overlay) ---')
   for (const r of results) console.log(JSON.stringify(r))
+  console.log('--- open menu (one row per crew, each with its own pin state) ---')
+  for (const r of menuResults) console.log(JSON.stringify(r))
+
+  // Every destination owns exactly one pin, and it reads checked for exactly the
+  // pinned crews. A screenshot of a pin that reports the wrong state would
+  // document a feature that does not work.
+  for (const m of menuResults) {
+    const lit = m.pins.filter(p => p.checked === 'true').map(p => p.id).sort()
+    const want = [...m.expectedPinned].sort()
+    if (m.pins.length !== CREWS.length + 1 || m.destinations !== m.pins.length) {
+      console.error(`FAIL: ${m.name} has ${m.pins.length} pins for ${m.destinations} destinations`)
+      console.error('      (expected one pin per row, Local included, and no second crew list)')
+      process.exit(1)
+    }
+    if (lit.join(',') !== want.join(',')) {
+      console.error(`FAIL: ${m.name} lit ${lit.join(',') || '(none)'}, expected ${want.join(',')}`)
+      process.exit(1)
+    }
+    if (m.pins.some(p => !p.name)) {
+      console.error(`FAIL: ${m.name} has an unnamed pin — an icon-only control must say which crew it pins`)
+      process.exit(1)
+    }
+  }
 
   const derived = results
   const bad = derived.filter(r => !r.overlayPresent || r.clearsOverlay !== true)

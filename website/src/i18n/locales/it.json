@@ -5392,9 +5392,6 @@
       "switch_crew": "Cambia crew",
       "switch_crew_unread": "Cambia crew, {{n}} non letti altrove",
       "stopped": "arrestato",
-      "pin_crews": "Fissa crew…",
-      "pinned": "fissato",
-      "pinned_no_room": "fissato, nessuno spazio nell’intestazione",
       "no_room": "nessuno spazio",
       "pin_crew": "Fissa {{name}} nell’intestazione",
       "unpin_crew": "Rimuovi {{name}} dall’intestazione"
